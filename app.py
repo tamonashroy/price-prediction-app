@@ -15,6 +15,13 @@ load_dotenv()
 st.set_page_config(page_title="Bitcoin Price Prediction Report", layout="wide")
 st.title("Bitcoin Daily Price Prediction Report")
 
+# --- Display Crypto Logo at the Top ---
+from PIL import Image
+logo_path = "crypto_logo.png"
+if os.path.exists(logo_path):
+    logo = Image.open(logo_path)
+    st.image(logo, width=80)
+
 # Sidebar for coin selection
 st.sidebar.header("Select Cryptocurrency")
 coins = get_all_coins_from_db()

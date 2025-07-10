@@ -312,7 +312,8 @@ def last5_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
     preds = []
     rolling_df = train.copy()
     for i in range(5):
-        feat_row = test.iloc[i][features].values.reshape(1, -1)
+        # Use DataFrame with feature names to avoid sklearn warning
+        feat_row = test.iloc[[i]][features]
         pred = model.predict(feat_row)[0]
         preds.append(round(pred, 7))
     test_dates = test['date'] if 'date' in test.columns else np.arange(len(y_test))
