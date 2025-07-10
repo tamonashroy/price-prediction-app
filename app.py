@@ -1,10 +1,16 @@
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from model import add_features, train_predictive_model, predict_next_days, plot_actual_vs_predicted_best, plot_next_days_bar
+from model import add_features, train_predictive_model, predict_next_days, plot_actual_vs_predicted_best, plot_next_days_bar, backtest_walk_forward, half_split_predict_and_plot, last5_predict_and_plot
 from db_utils import get_all_coins_from_db, get_coin_data_from_db, load_predictions_from_db, save_predictions_to_db
 from sklearn.model_selection import train_test_split
 import time
+import os
+from dotenv import load_dotenv
+from coinswitch_sidebar_utils import get_top_coinswitch_green_1d
+
+# Load environment variables from .env file
+load_dotenv()
 
 st.set_page_config(page_title="Bitcoin Price Prediction Report", layout="wide")
 st.title("Bitcoin Daily Price Prediction Report")
@@ -118,46 +124,81 @@ pred_table = pd.DataFrame({"Date": future_dates, "Predicted Price": future_price
 pred_table["% Change"] = pred_table["Predicted Price"].pct_change().fillna((pred_table["Predicted Price"][0] - last_actual_price) / last_actual_price).apply(lambda x: f"{x*100:+.2f}%")
 st.dataframe(pred_table)
 
+# Load predictions for sidebar sections
+results_df = load_predictions_from_db()
+placeholder_columns = ['Coin', '5-Day Predicted Prices', '5-Day % Change']
+# Sidebar: Show top 5 Coinswitch coins predicted to be green in the next 5 days (descending order of 5-day percent change)
+st.sidebar.header("Top Coinswitch Coins Predicted to be Green (Next 5 Days)")
+coinswitch_mapping_path = "coinswitch_coin_mapping.csv"
+if os.path.exists(coinswitch_mapping_path):
+    coinswitch_mapping = pd.read_csv(coinswitch_mapping_path)
+    coinswitch_coin_ids = set(coinswitch_mapping['coin_id'].dropna().str.lower())
+    if results_df is not None and not results_df.empty:
+        # Filter results_df for only coinswitch coins (case-insensitive match)
+        filtered_df = results_df[results_df['Coin'].str.lower().isin(coinswitch_coin_ids)]
+        filtered_df = filtered_df.sort_values('5-Day % Change', ascending=False).head(5)
+        if not filtered_df.empty:
+            st.sidebar.dataframe(filtered_df)
+        else:
+            st.sidebar.info("No Coinswitch coins predicted to be green in the next 5 days.")
+    else:
+        st.sidebar.info("No predictions found. Click 'Update Predictions Now' above to generate.")
+else:
+    st.sidebar.warning("coinswitch_coin_mapping.csv not found. Please run the mapping script.")
+
 # Sidebar: Show coins predicted to be green in descending order of 5-day percent change
 st.sidebar.header("Top Coins Predicted to be Green (Next 5 Days)")
 results_df = load_predictions_from_db()
+placeholder_columns = ['Coin', '5-Day Predicted Prices', '5-Day % Change']
+
 if results_df is not None and not results_df.empty:
     st.sidebar.dataframe(results_df)
-    st.sidebar.info("Loaded predictions from database. To refresh, rerun the prediction update script.")
+    if st.sidebar.button("Update Predictions Now", key="update_preds_btn"):
+        with st.spinner("Updating predictions for all coins (this may take a while)..."):
+            results = []
+            for idx, (coin_name, coin_id) in enumerate(coins):
+                df = get_coin_data_from_db(coin_id)
+                if df.empty or len(df) < 40:
+                    continue
+                df_feat = add_features(df)
+                if df_feat.empty or len(df_feat) < 10:
+                    continue
+                df_feat = df_feat.reset_index(drop=True)
+                model, features_local, _, _ = train_predictive_model(df_feat)
+                future_dates, future_prices = predict_next_days(df_feat, model, days=5, features=features_local)
+                last_actual_price = df_feat['price'].iloc[-1]
+                pct_change = (future_prices[-1] - last_actual_price) / last_actual_price * 100 if last_actual_price != 0 else 0
+                if future_prices[-1] > last_actual_price:
+                    results.append({
+                        'Coin': coin_name,
+                        '5-Day Predicted Prices': ", ".join([f"{p:.2f}" for p in future_prices]),
+                        '5-Day % Change': f"{pct_change:+.2f}%"
+                    })
+            if results:
+                results = sorted(results, key=lambda x: float(x['5-Day % Change'].replace('%','')), reverse=True)
+                results_df = pd.DataFrame(results)
+                st.sidebar.dataframe(results_df)
+                save_predictions_to_db(results)
+                st.sidebar.success("Predictions updated and saved to database.")
+            else:
+                st.sidebar.write("No coins predicted to be green in the next 5 days.")
+    st.sidebar.info("Showing last saved predictions. Click 'Update Predictions Now' to refresh.")
 else:
-    results = []
-    progress = st.progress(0)
-    for idx, (coin_name, coin_id) in enumerate(coins):
-        df = get_coin_data_from_db(coin_id)
-        if df.empty or len(df) < 40:
-            continue
-        df_feat = add_features(df)
-        if df_feat.empty or len(df_feat) < 10:
-            continue
-        df_feat = df_feat.reset_index(drop=True)
-        X = df_feat[features]
-        y = df_feat['price']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        model, features_local, _, _ = train_predictive_model(df_feat)
-        future_dates, future_prices = predict_next_days(df_feat, model, days=5, features=features_local)
-        last_actual_price = df_feat['price'].iloc[-1]
-        pct_change = (future_prices[-1] - last_actual_price) / last_actual_price * 100 if last_actual_price != 0 else 0
-        if future_prices[-1] > last_actual_price:
-            results.append({
-                'Coin': coin_name,
-                '5-Day Predicted Prices': ", ".join([f"{p:.2f}" for p in future_prices]),
-                '5-Day % Change': f"{pct_change:+.2f}%"
-            })
-        progress.progress((idx+1)/len(coins))
-    progress.empty()
-    if results:
-        results = sorted(results, key=lambda x: float(x['5-Day % Change'].replace('%','')), reverse=True)
-        results_df = pd.DataFrame(results)
-        st.sidebar.dataframe(results_df)
-        save_predictions_to_db(results)
-        st.sidebar.success("Predictions calculated and saved to database.")
-    else:
-        st.sidebar.write("No coins predicted to be green in the next 5 days.")
+    st.sidebar.dataframe(pd.DataFrame(columns=placeholder_columns))
+    st.sidebar.warning("No predictions found. Click 'Update Predictions Now' to generate.")
+
+# --- Clickable coin names for rerun ---
+def set_coin_and_rerun(coin_name):
+    st.experimental_set_query_params(selected_coin=coin_name)
+    st.experimental_rerun()
+
+# --- On page load, set selected_coin from query params if present ---
+query_params = st.experimental_get_query_params()
+if 'selected_coin' in query_params:
+    selected_coin_param = query_params['selected_coin'][0]
+    if selected_coin_param in coin_names:
+        selected_coin = selected_coin_param
+        coin_id = coin_ids[selected_coin]
 
 # Streamlit page navigation
 st.sidebar.markdown("---")
@@ -286,3 +327,60 @@ try:
         plt.close(fig)
 except Exception as e:
     st.sidebar.warning(f"Could not fetch top 10 coins by volume: {e}")
+
+# Walk-Forward Backtesting
+st.header("6. Walk-Forward Backtesting (Best Model)")
+with st.spinner("Running walk-forward backtest (this may take a few seconds)..."):
+    dates, y_true, y_pred = backtest_walk_forward(df_feat, type(model), features, target_col='price', test_size=0.2, retrain_window=50)
+fig3 = plt.figure(figsize=(10,5))
+plt.plot(dates, y_true, label='Actual Price', color='blue')
+plt.plot(dates, y_pred, label='Predicted Price', color='orange')
+plt.title('Walk-Forward Backtesting: Actual vs Predicted Prices')
+plt.xlabel('Date')
+plt.ylabel('Price')
+plt.legend()
+plt.tight_layout()
+plt.xticks(rotation=45)
+st.pyplot(fig3)
+plt.close(fig3)
+st.write("The plot above shows how the model's predictions track the actual price over the test period using walk-forward retraining.")
+
+# --- Half-Split Train/Test: Next 5 Days Actual vs Predicted ---
+st.header("6. Half-Split Train/Test: Next 5 Days Actual vs Predicted")
+try:
+    results_df = half_split_predict_and_plot(df_feat, plot=True)
+    st.write("Actual vs Predicted for the next 5 days (half-split):")
+    st.dataframe(results_df, use_container_width=True)
+except Exception as e:
+    st.warning(f"Could not run half-split prediction: {e}")
+
+# --- Last 5 Days Actual vs Predicted ---
+st.header("6. Last 5 Days: Actual vs Predicted (Train up to Today-5)")
+try:
+    results_df = last5_predict_and_plot(df_feat, plot=True)
+    st.write("Actual vs Predicted for the last 5 days:")
+    st.dataframe(results_df, use_container_width=True)
+except Exception as e:
+    st.warning(f"Could not run last-5 prediction: {e}")
+
+# --- Load precomputed batch results ---
+import os
+BATCH_5DAY_PATH = 'batch_5day_predictions.csv'
+BATCH_LAST5_PATH = 'batch_last5_actual_vs_predicted.csv'
+
+if os.path.exists(BATCH_5DAY_PATH):
+    st.sidebar.header("Top Coins Predicted to be Green (Next 5 Days) [Batch]")
+    batch_5day = pd.read_csv(BATCH_5DAY_PATH)
+    st.sidebar.dataframe(batch_5day)
+else:
+    st.sidebar.info("No batch 5-day predictions found. Run daily_batch_predict.py to generate.")
+
+# --- Last 5 Days Actual vs Predicted (Batch) ---
+st.header("6. Last 5 Days: Actual vs Predicted (Batch, All Coins)")
+if os.path.exists(BATCH_LAST5_PATH):
+    batch_last5 = pd.read_csv(BATCH_LAST5_PATH)
+    st.dataframe(batch_last5)
+else:
+    st.info("No batch last-5 actual vs predicted found. Run daily_batch_predict.py to generate.")
+
+st.sidebar.markdown("---")

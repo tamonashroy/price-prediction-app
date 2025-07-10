@@ -113,6 +113,16 @@ if __name__ == "__main__":
         coins = [(cid, id_to_name.get(cid, cid)) for cid in coin_ids]
     else:
         coins = get_top_coins(COINS_LIMIT)
+    # --- Add Coinswitch coins from mapping CSV ---
+    coinswitch_path = "coinswitch_coin_mapping.csv"
+    if os.path.exists(coinswitch_path):
+        coinswitch_df = pd.read_csv(coinswitch_path)
+        for _, row in coinswitch_df.iterrows():
+            cid = str(row['coin_id']).strip().lower()
+            cname = str(row['coin_name']).strip() if pd.notnull(row['coin_name']) and row['coin_name'] else cid.upper()
+            if cid and (cid, cname) not in coins:
+                coins.append((cid, cname))
+    # --- End Coinswitch addition ---
     for idx, (coin_id, coin_name) in enumerate(coins):
         print(f"[{idx+1}/{len(coins)}] Fetching {coin_name} ({coin_id})...")
         if not table_exists(engine, "coin_prices"):
