@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import os
 from sqlalchemy import create_engine, text
+import sys
 
 DB_PATH = "coin_prices.db"
 engine = create_engine(f"sqlite:///{DB_PATH}")
@@ -66,15 +67,64 @@ def fetch_coin_data(coin_id, from_date=None):
     print(f"Failed to fetch data for {coin_id} after {MAX_RETRIES} retries.")
     return None
 
+def add_technical_indicators(df):
+    # Simple Moving Averages
+    df['ma7'] = df['price'].rolling(window=7).mean()
+    df['ma14'] = df['price'].rolling(window=14).mean()
+    df['ma30'] = df['price'].rolling(window=30).mean()
+    # Exponential Moving Averages
+    df['ema7'] = df['price'].ewm(span=7, adjust=False).mean()
+    df['ema14'] = df['price'].ewm(span=14, adjust=False).mean()
+    # Daily returns
+    df['daily_return'] = df['price'].pct_change()
+    # Rolling volatility
+    df['volatility7'] = df['daily_return'].rolling(window=7).std()
+    df['volatility14'] = df['daily_return'].rolling(window=14).std()
+    # RSI
+    delta = df['price'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi14'] = 100 - (100 / (1 + rs))
+    # MACD
+    ema12 = df['price'].ewm(span=12, adjust=False).mean()
+    ema26 = df['price'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    return df
+
+def table_exists(engine, table_name):
+    # Check if a table exists in the SQLite database
+    return engine.dialect.has_table(engine.connect(), table_name)
+
 if __name__ == "__main__":
-    coins = get_top_coins(COINS_LIMIT)
+    # If coin IDs are passed as arguments, ingest only those
+    if len(sys.argv) > 1:
+        coin_ids = sys.argv[1:]
+        # Get names for these coins from CoinGecko
+        url = "https://api.coingecko.com/api/v3/coins/list"
+        try:
+            resp = requests.get(url)
+            all_coins = resp.json()
+            id_to_name = {c['id']: c['name'] for c in all_coins}
+        except Exception:
+            id_to_name = {cid: cid for cid in coin_ids}
+        coins = [(cid, id_to_name.get(cid, cid)) for cid in coin_ids]
+    else:
+        coins = get_top_coins(COINS_LIMIT)
     for idx, (coin_id, coin_name) in enumerate(coins):
         print(f"[{idx+1}/{len(coins)}] Fetching {coin_name} ({coin_id})...")
-        latest_date = get_latest_date_for_coin(coin_id)
+        if not table_exists(engine, "coin_prices"):
+            latest_date = None
+        else:
+            latest_date = get_latest_date_for_coin(coin_id)
         df = fetch_coin_data(coin_id, from_date=latest_date)
         if df is not None and not df.empty:
             df['coin_id'] = coin_id
             df['coin_name'] = coin_name
+            # Add technical indicators before saving
+            df = add_technical_indicators(df)
             df.to_sql("coin_prices", engine, if_exists="append", index=False)
             print(f"  Added {len(df)} new rows.")
         else:

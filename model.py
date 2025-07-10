@@ -11,14 +11,37 @@ import matplotlib.pyplot as plt
 
 def add_features(df):
     df = df.copy()
-    df['price_lag1'] = df['price'].shift(1)
-    df['price_ma7'] = df['price'].rolling(window=7).mean()
-    df['price_ma30'] = df['price'].rolling(window=30).mean()
+    # Simple Moving Averages
+    df['ma7'] = df['price'].rolling(window=7).mean()
+    df['ma14'] = df['price'].rolling(window=14).mean()
+    df['ma30'] = df['price'].rolling(window=30).mean()
+    # Exponential Moving Averages
+    df['ema7'] = df['price'].ewm(span=7, adjust=False).mean()
+    df['ema14'] = df['price'].ewm(span=14, adjust=False).mean()
+    # Daily returns
+    df['daily_return'] = df['price'].pct_change()
+    # Rolling volatility
+    df['volatility7'] = df['daily_return'].rolling(window=7).std()
+    df['volatility14'] = df['daily_return'].rolling(window=14).std()
+    # RSI
+    delta = df['price'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi14'] = 100 - (100 / (1 + rs))
+    # MACD
+    ema12 = df['price'].ewm(span=12, adjust=False).mean()
+    ema26 = df['price'].ewm(span=26, adjust=False).mean()
+    df['macd'] = ema12 - ema26
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    # Drop rows with any NaN values from feature creation
     df = df.dropna()
     return df
 
 def train_predictive_model(df):
-    features = ['price_lag1', 'price_ma7', 'price_ma30']
+    # Use all columns except 'date', 'coin_id', 'coin_name', and 'price' as features
+    features = [col for col in df.columns if col not in ['date', 'coin_id', 'coin_name', 'price']]
     df = df.reset_index(drop=True)  # Ensure indices are aligned
     X = df[features]
     y = df['price']
@@ -37,54 +60,50 @@ def train_predictive_model(df):
         'ElasticNet': ElasticNet()
     }
     mse_scores = {}
-    lasso_pred = None
     for name, model in models.items():
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
         mse = mean_squared_error(y_test, y_pred)
         mse_scores[name] = mse
-        print(f"{name} Test MSE: {mse:.2f}")
-        if name == 'Lasso':
-            lasso_pred = y_pred
     best_model_name = min(mse_scores, key=mse_scores.get)
-    print(f"\nBest model: {best_model_name} with MSE: {mse_scores[best_model_name]:.2f}")
-    # Plot actual vs predicted for Lasso
-    if lasso_pred is not None:
-        plt.figure(figsize=(10,5))
-        test_dates = df.loc[X_test.index, 'date'] if 'date' in df.columns else X_test.index
-        plt.plot(test_dates, y_test.values, label='Actual')
-        plt.plot(test_dates, lasso_pred, label='Lasso Predicted')
-        plt.title('Actual vs Predicted Bitcoin Price (Lasso)')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.legend()
-        plt.tight_layout()
-        plt.xticks(rotation=45)
-        plt.show()
-    return models[best_model_name]
+    return models[best_model_name], features, mse_scores, best_model_name
 
-def predict_next_days(df, model, days=5):
+def predict_next_days(df, model, days=5, features=None):
     df = df.copy()
     future_dates = []
     future_prices = []
+    if features is None:
+        raise ValueError("You must provide the features argument to predict_next_days to avoid KeyError. Use the same features as used for training.")
     for i in range(days):
         last_row = df.iloc[-1]
         next_date = pd.to_datetime(last_row['date']) + pd.Timedelta(days=1)
-        price_lag1 = last_row['price']
-        price_ma7 = df['price'].tail(7).mean()
-        price_ma30 = df['price'].tail(30).mean() if len(df) >= 30 else df['price'].mean()
-        features = np.array([[price_lag1, price_ma7, price_ma30]])
-        next_price = model.predict(features)[0]
+        # Build feature row for prediction
+        feat_row = []
+        for feat in features:
+            if feat in df.columns:
+                # For lags, use last available value; for rolling, use last available
+                if 'lag' in feat:
+                    lag_n = int(''.join(filter(str.isdigit, feat)))
+                    if len(df) > lag_n:
+                        feat_row.append(df['price'].iloc[-lag_n])
+                    else:
+                        feat_row.append(last_row['price'])
+                else:
+                    feat_row.append(last_row.get(feat, np.nan))
+            else:
+                feat_row.append(np.nan)
+        features_df = pd.DataFrame([feat_row], columns=features)
+        next_price = model.predict(features_df)[0]
         future_dates.append(next_date.date())
         future_prices.append(next_price)
         # Append new row for next iteration
+        new_row = last_row.copy()
+        new_row['date'] = next_date.date()
+        new_row['price'] = next_price
         df = pd.concat([
             df,
-            pd.DataFrame({'date': [next_date.date()], 'price': [next_price]})
+            pd.DataFrame([new_row])
         ], ignore_index=True)
-    print("\nNext 5 days price prediction:")
-    for d, p in zip(future_dates, future_prices):
-        print(f"{d}: {p:.2f}")
     return future_dates, future_prices
 
 def plot_actual_vs_predicted_best(y_test, y_pred, test_dates, model_name):
