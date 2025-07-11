@@ -352,6 +352,66 @@ def last5_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
         plt.show()
     return results_df
 
+# --- Modularization and Robustness Improvements ---
+
+def get_top_green_coins(df, n=10, coinswitch_only=False, coinswitch_coin_ids=None):
+    """
+    Predict next 5 days for each coin, select those with all 5 days green (price increase).
+    Returns a list of dicts with coin_id, coin_name, predictions, best model, and logo.
+    """
+    import coinswitch_sidebar_utils
+    import db_utils
+    import requests
+    results = []
+    for coin_id, group in df.groupby('coin_id'):
+        coin_name = group['coin_name'].iloc[0] if 'coin_name' in group.columns else coin_id
+        if coinswitch_only:
+            if coinswitch_coin_ids is None:
+                continue
+            if coin_id not in coinswitch_coin_ids:
+                continue
+        try:
+            features_df = add_features(group)
+            best_model, features, _, best_model_name = train_predictive_model(features_df)
+            future_dates, future_prices = predict_next_days(features_df, best_model, days=5, features=features)
+            last_price = features_df['price'].iloc[-1]
+            is_green = all([p > last_price for p in future_prices])
+            if is_green:
+                logo = get_coin_logo(coin_id, coin_name)
+                results.append({
+                    'coin_id': coin_id,
+                    'coin_name': coin_name,
+                    'future_dates': future_dates,
+                    'future_prices': future_prices,
+                    'best_model': best_model_name,
+                    'logo': logo
+                })
+        except Exception:
+            continue
+    # Sort by predicted percent increase over 5 days
+    def pct_increase(coin):
+        try:
+            base = coin['future_prices'][0]
+            end = coin['future_prices'][-1]
+            return (end - base) / base if base != 0 else 0
+        except Exception:
+            return 0
+    results.sort(key=pct_increase, reverse=True)
+    return results[:n]
+
+def get_coin_logo(coin_id, coin_name):
+    """Try to get a public logo for the coin, fallback to dummy logo."""
+    import requests
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data['image']['thumb']
+    except Exception:
+        pass
+    return "https://via.placeholder.com/32?text=?"
+
 # For further extension:
 # - You can add XGBoost, LightGBM, or CatBoost models if desired
 # - You can add neural network models (Keras, PyTorch) for experimentation

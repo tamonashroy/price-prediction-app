@@ -96,7 +96,8 @@ def add_technical_indicators(df):
 
 def table_exists(engine, table_name):
     # Check if a table exists in the SQLite database
-    return engine.dialect.has_table(engine.connect(), table_name)
+    with engine.connect() as conn:
+        return engine.dialect.has_table(conn, table_name)
 
 if __name__ == "__main__":
     # If coin IDs are passed as arguments, ingest only those
@@ -141,3 +142,5 @@ if __name__ == "__main__":
             print(f"  No new data for {coin_name}.")
         time.sleep(SLEEP_BETWEEN_REQUESTS)
     print("Ingestion complete. All coin data saved to coin_prices.db.")
+    # Dispose engine to close all connections
+    engine.dispose()
