@@ -33,14 +33,19 @@ jobs:
         run: python filter_top5_green_coinswitch.py
 
       - name: Simulate daily trade performance
-        run: python top5_daily_trade_simulation.py
+        run: python positions_actual_vs_predicted.py
+
+      - name: Record refresh timestamp
+        run: |
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > last_refresh.txt
 
       - name: Commit and push results
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add batch_5day_predictions.csv batch_last5_actual_vs_predicted.csv top5_coinswitch_5day_predictions.csv top5_daily_trade_simulation_summary.csv top5_daily_trade_simulation_details.csv
+          git add batch_5day_predictions.csv batch_last5_actual_vs_predicted.csv top5_coinswitch_5day_predictions.csv positions_actual_vs_predicted.csv last_refresh.txt
           git commit -m 'Update batch predictions and trade simulation [skip ci]' || echo 'No changes to commit'
+          git pull --rebase origin main || echo 'No remote changes to rebase'
           git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

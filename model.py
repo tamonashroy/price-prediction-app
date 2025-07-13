@@ -9,6 +9,7 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.feature_selection import SelectKBest, f_regression
 import matplotlib.pyplot as plt
+from db_predictions import insert_coin_predictions
 
 def add_features(df):
     df = df.copy()
@@ -46,6 +47,10 @@ def add_features(df):
         df[f'rsi14_lag{lag}'] = df['rsi14'].shift(lag)
     # Drop rows with any NaN values from feature creation
     df = df.dropna()
+    # Debug: print shape and columns after feature engineering
+    print(f"[add_features] After dropna: shape={df.shape}, columns={df.columns.tolist()}")
+    if df.empty:
+        print("[add_features] Feature DataFrame is EMPTY after feature engineering!")
     return df
 
 def train_predictive_model(df, predict_return=False, use_grid_search=True, use_feature_selection=True, k_best=15):
@@ -99,6 +104,7 @@ def train_predictive_model(df, predict_return=False, use_grid_search=True, use_f
     return best_model, features, mse_scores, best_model_name
 
 def predict_next_days(df, model, days=5, features=None):
+    import numpy as np
     df = df.copy()
     future_dates = []
     future_prices = []
@@ -124,6 +130,8 @@ def predict_next_days(df, model, days=5, features=None):
                 feat_row.append(np.nan)
         features_df = pd.DataFrame([feat_row], columns=features)
         next_price = model.predict(features_df)[0]
+        # Clamp to non-negative
+        next_price = max(0, next_price)
         future_dates.append(next_date.date())
         future_prices.append(next_price)
         # Append new row for next iteration
@@ -223,6 +231,7 @@ def half_split_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
     y_col = 'daily_return' if predict_return else 'price'
     n = len(df)
     if n < 20:
+        print(f"[half_split_predict_and_plot] Not enough data: n={n}")
         raise ValueError("Not enough data for half-split train/test.")
     split_idx = n // 2
     train = df.iloc[:split_idx]
@@ -266,6 +275,9 @@ def half_split_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
         'actual': actual_next5,
         'predicted': future_prices
     })
+    # Debug: print diagnostics DataFrame
+    print(f"[half_split_predict_and_plot] results_df shape: {results_df.shape}")
+    print(results_df.head())
     # Plot next 5 days
     if plot:
         plt.figure(figsize=(8,4))
@@ -290,6 +302,7 @@ def last5_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
     y_col = 'daily_return' if predict_return else 'price'
     n = len(df)
     if n < 15:
+        print(f"[last5_predict_and_plot] Not enough data: n={n}")
         raise ValueError("Not enough data for last-5 prediction.")
     train = df.iloc[:-5]
     test = df.iloc[-5:]
@@ -339,6 +352,9 @@ def last5_predict_and_plot(df, predict_return=False, k_best=15, plot=True):
         'pct_increase_predicted': pct_increase_pred,
         'pct_diff_pred_vs_actual': pct_diff
     })
+    # Debug: print diagnostics DataFrame
+    print(f"[last5_predict_and_plot] results_df shape: {results_df.shape}")
+    print(results_df.head())
     if plot:
         plt.figure(figsize=(8,4))
         plt.plot(results_df['date'], results_df['actual'], marker='o', label='Actual')
@@ -411,6 +427,42 @@ def get_coin_logo(coin_id, coin_name):
     except Exception:
         pass
     return "https://via.placeholder.com/32?text=?"
+
+def store_predictions_for_coin(coin_id, predicted_prices, model_name, prediction_date=None):
+    from datetime import date, timedelta
+    if prediction_date is None:
+        prediction_date = date.today()
+    predictions = []
+    for i, price in enumerate(predicted_prices):
+        pred = {
+            "coin_id": coin_id,
+            "prediction_date": str(prediction_date),
+            "target_date": str(prediction_date + timedelta(days=i)),
+            "predicted_price": float(price),
+            "model_name": model_name
+        }
+        predictions.append(pred)
+    insert_coin_predictions(predictions)
+
+def debug_plot_features_and_predictions(df, coin_id, model, features, days=5):
+    import matplotlib.pyplot as plt
+    # Plot last 30 days actual prices
+    last_30 = df.tail(30)
+    plt.figure(figsize=(10,4))
+    plt.plot(last_30['date'], last_30['price'], marker='o', label='Actual Price (last 30d)')
+    # Predict next 5 days
+    future_dates, future_prices = predict_next_days(df, model, days=days, features=features)
+    plt.plot([str(f) for f in future_dates], future_prices, marker='x', linestyle='--', color='red', label='Predicted Next 5d')
+    plt.title(f'{coin_id}: Last 30d Actual & Next 5d Predicted Prices')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+    # Print last 5 rows of features for inspection
+    print('Last 5 rows of features:')
+    print(df[features + ['price']].tail(5))
 
 # For further extension:
 # - You can add XGBoost, LightGBM, or CatBoost models if desired

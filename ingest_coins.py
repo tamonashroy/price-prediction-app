@@ -8,7 +8,7 @@ import sys
 DB_PATH = "coin_prices.db"
 engine = create_engine(f"sqlite:///{DB_PATH}")
 
-COINS_LIMIT = 100
+COINS_LIMIT = 150
 SLEEP_BETWEEN_REQUESTS = 5  # seconds
 MAX_RETRIES = 5
 RETRY_BACKOFF = 30  # seconds on 429
@@ -100,31 +100,35 @@ def table_exists(engine, table_name):
         return engine.dialect.has_table(conn, table_name)
 
 if __name__ == "__main__":
-    # If coin IDs are passed as arguments, ingest only those
-    if len(sys.argv) > 1:
-        coin_ids = sys.argv[1:]
-        # Get names for these coins from CoinGecko
-        url = "https://api.coingecko.com/api/v3/coins/list"
-        try:
-            resp = requests.get(url)
-            all_coins = resp.json()
-            id_to_name = {c['id']: c['name'] for c in all_coins}
-        except Exception:
-            id_to_name = {cid: cid for cid in coin_ids}
-        coins = [(cid, id_to_name.get(cid, cid)) for cid in coin_ids]
-    else:
-        coins = get_top_coins(COINS_LIMIT)
-    # --- Add Coinswitch coins from mapping CSV ---
+    # Only use coins from coinswitch mapping, sorted by market cap
     coinswitch_path = "coinswitch_coin_mapping.csv"
+    coins = []
     if os.path.exists(coinswitch_path):
         coinswitch_df = pd.read_csv(coinswitch_path)
-        for _, row in coinswitch_df.iterrows():
-            cid = str(row['coin_id']).strip().lower()
-            cname = str(row['coin_name']).strip() if pd.notnull(row['coin_name']) and row['coin_name'] else cid.upper()
-            if cid and (cid, cname) not in coins:
-                coins.append((cid, cname))
-    # --- End Coinswitch addition ---
-    coins = coins[:COINS_LIMIT]  # Strictly limit to 100 coins
+        # Remove rows with missing coin_id
+        coinswitch_df = coinswitch_df[coinswitch_df['coin_id'].notnull() & (coinswitch_df['coin_id'] != '')]
+        coin_ids = coinswitch_df['coin_id'].str.lower().unique().tolist()
+        # Fetch market cap for all coinswitch coins from CoinGecko
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            'vs_currency': 'usd',
+            'ids': ','.join(coin_ids),
+            'order': 'market_cap_desc',
+            'per_page': len(coin_ids),
+            'page': 1,
+            'sparkline': False
+        }
+        response = requests.get(url, params=params)
+        data = response.json() if response.status_code == 200 else []
+        # Build list of (coin_id, coin_name, market_cap)
+        id_to_name = {str(row['coin_id']).lower(): str(row['coin_name']) if pd.notnull(row['coin_name']) and row['coin_name'] else str(row['coin_id']).upper() for _, row in coinswitch_df.iterrows()}
+        coins_with_cap = [(c['id'], id_to_name.get(c['id'], c['id'].upper()), c.get('market_cap', 0)) for c in data if c['id'] in coin_ids]
+        # Sort by market cap descending and take top 150
+        coins_with_cap = sorted(coins_with_cap, key=lambda x: x[2] if x[2] is not None else 0, reverse=True)[:COINS_LIMIT]
+        coins = [(cid, cname) for cid, cname, _ in coins_with_cap]
+    else:
+        print("coinswitch_coin_mapping.csv not found. Exiting.")
+        sys.exit(1)
     for idx, (coin_id, coin_name) in enumerate(coins):
         print(f"[{idx+1}/{len(coins)}] Fetching {coin_name} ({coin_id})...")
         if not table_exists(engine, "coin_prices"):
