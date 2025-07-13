@@ -19,7 +19,7 @@ def get_top_coins(limit=COINS_LIMIT):
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
         'vs_currency': 'usd',
-        'order': 'volume_desc',
+        'order': 'market_cap_desc',  # switched to market cap
         'per_page': limit,
         'page': 1,
         'sparkline': False
@@ -124,6 +124,7 @@ if __name__ == "__main__":
             if cid and (cid, cname) not in coins:
                 coins.append((cid, cname))
     # --- End Coinswitch addition ---
+    coins = coins[:COINS_LIMIT]  # Strictly limit to 100 coins
     for idx, (coin_id, coin_name) in enumerate(coins):
         print(f"[{idx+1}/{len(coins)}] Fetching {coin_name} ({coin_id})...")
         if not table_exists(engine, "coin_prices"):

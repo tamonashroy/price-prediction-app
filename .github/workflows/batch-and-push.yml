@@ -29,12 +29,18 @@ jobs:
       - name: Run batch script
         run: python daily_batch_predict.py
 
+      - name: Filter top 5 green coinswitch coins
+        run: python filter_top5_green_coinswitch.py
+
+      - name: Simulate daily trade performance
+        run: python top5_daily_trade_simulation.py
+
       - name: Commit and push results
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add batch_5day_predictions.csv batch_last5_actual_vs_predicted.csv
-          git commit -m 'Update batch predictions [skip ci]' || echo 'No changes to commit'
+          git add batch_5day_predictions.csv batch_last5_actual_vs_predicted.csv top5_coinswitch_5day_predictions.csv top5_daily_trade_simulation_summary.csv top5_daily_trade_simulation_details.csv
+          git commit -m 'Update batch predictions and trade simulation [skip ci]' || echo 'No changes to commit'
           git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
