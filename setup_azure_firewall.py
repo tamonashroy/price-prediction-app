@@ -5,9 +5,9 @@ Adds current runner's IP to allow database connections.
 
 import os
 import requests
-import subprocess
 import json
 from datetime import datetime
+from azure.identity import ClientSecretCredential
 
 def get_runner_ip():
     """Get the current GitHub Actions runner's public IP."""
@@ -42,101 +42,86 @@ def get_runner_ip():
         raise
 
 def create_firewall_rule(ip_address, rule_name="GitHubActions"):
-    """Create an Azure SQL Server firewall rule for the given IP address."""
+    """Create an Azure SQL Server firewall rule using REST API."""
     try:
         # Get Azure credentials from environment
         tenant_id = os.getenv("AZURE_SQL_TENANT_ID")
         client_id = os.getenv("AZURE_SQL_CLIENT_ID")
         client_secret = os.getenv("AZURE_SQL_CLIENT_SECRET")
+        subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+        resource_group = os.getenv("AZURE_RESOURCE_GROUP", "default-rg")
+        server_name = "cryptopp"
         
-        if not all([tenant_id, client_id, client_secret]):
-            raise ValueError("Missing Azure credentials in environment variables")
+        if not all([tenant_id, client_id, client_secret, subscription_id]):
+            raise ValueError("Missing Azure credentials in environment variables (need TENANT_ID, CLIENT_ID, CLIENT_SECRET, SUBSCRIPTION_ID)")
         
-        # Get Azure access token
+        # Get access token using ClientSecretCredential
         print("Authenticating with Azure...")
-        token_response = subprocess.run(
-            [
-                "az", "login",
-                "--service-principal",
-                "-u", client_id,
-                "-p", client_secret,
-                "--tenant", tenant_id
-            ],
-            capture_output=True,
-            text=True,
-            check=False
+        credentials = ClientSecretCredential(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret
         )
         
-        if token_response.returncode != 0:
-            print(f"✗ Azure login failed: {token_response.stderr}")
-            raise Exception(f"Azure authentication failed: {token_response.stderr}")
-        
+        # Get token for Azure Management API
+        token = credentials.get_token("https://management.azure.com/.default")
+        access_token = token.token
         print("✓ Azure authentication successful")
         
-        # Set default subscription
-        subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
-        if subscription_id:
-            print(f"Setting default subscription to {subscription_id}...")
-            set_sub_response = subprocess.run(
-                ["az", "account", "set", "--subscription", subscription_id],
-                capture_output=True,
-                text=True,
-                check=False
-            )
-            if set_sub_response.returncode != 0:
-                print(f"✗ Failed to set subscription: {set_sub_response.stderr}")
-                raise Exception(f"Failed to set subscription: {set_sub_response.stderr}")
-            print("✓ Subscription set successfully")
-        
-        # Extract server name from connection string
-        server_name = "cryptopp"
-        resource_group = os.getenv("AZURE_RESOURCE_GROUP", "default-rg")
-        
-        # Create or update firewall rule
-        print(f"Creating firewall rule '{rule_name}' for IP {ip_address}...")
-        
-        rule_response = subprocess.run(
-            [
-                "az", "sql", "server", "firewall-rule", "create",
-                "--resource-group", resource_group,
-                "--server", server_name,
-                "--name", rule_name,
-                "--start-ip-address", ip_address,
-                "--end-ip-address", ip_address
-            ],
-            capture_output=True,
-            text=True,
-            check=False
+        # Build REST API URL for firewall rule
+        api_url = (
+            f"https://management.azure.com/subscriptions/{subscription_id}/"
+            f"resourceGroups/{resource_group}/"
+            f"providers/Microsoft.Sql/servers/{server_name}/"
+            f"firewallRules/{rule_name}"
+            f"?api-version=2015-05-01-preview"
         )
         
-        if rule_response.returncode == 0:
+        # Prepare firewall rule request body
+        firewall_rule_body = {
+            "properties": {
+                "startIpAddress": ip_address,
+                "endIpAddress": ip_address
+            }
+        }
+        
+        # Create or update firewall rule via REST API
+        print(f"Creating firewall rule '{rule_name}' for IP {ip_address}...")
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.put(
+            api_url,
+            json=firewall_rule_body,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201]:
             print(f"✓ Firewall rule created/updated successfully")
             return True
-        elif "already exists" in rule_response.stderr or "duplicate" in rule_response.stderr.lower():
-            print(f"✓ Firewall rule already exists (this is fine)")
-            # Try to update it instead
-            update_response = subprocess.run(
-                [
-                    "az", "sql", "server", "firewall-rule", "update",
-                    "--resource-group", resource_group,
-                    "--server", server_name,
-                    "--name", rule_name,
-                    "--start-ip-address", ip_address,
-                    "--end-ip-address", ip_address
-                ],
-                capture_output=True,
-                text=True,
-                check=False
+        elif response.status_code == 409:
+            # Conflict - rule already exists, try to update anyway
+            print(f"✓ Firewall rule already exists, updating...")
+            response = requests.put(
+                api_url,
+                json=firewall_rule_body,
+                headers=headers,
+                timeout=30
             )
-            if update_response.returncode == 0:
+            if response.status_code in [200, 201]:
                 print(f"✓ Firewall rule updated successfully")
                 return True
             else:
-                print(f"✗ Failed to update firewall rule: {update_response.stderr}")
-                raise Exception(f"Firewall rule update failed: {update_response.stderr}")
+                error_msg = response.text
+                print(f"✗ Failed to update firewall rule: {error_msg}")
+                raise Exception(f"Firewall rule update failed: {error_msg}")
         else:
-            print(f"✗ Failed to create firewall rule: {rule_response.stderr}")
-            raise Exception(f"Firewall rule creation failed: {rule_response.stderr}")
+            error_msg = response.text
+            print(f"✗ Failed to create firewall rule: {error_msg}")
+            raise Exception(f"Firewall rule creation failed: {error_msg}")
     
     except Exception as e:
         print(f"✗ Error creating firewall rule: {e}")
