@@ -24,10 +24,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
       
-      - name: Install ODBC Driver
+      - name: Install ODBC Driver 18 for SQL Server
         run: |
           sudo apt-get update
-          sudo apt-get install -y odbc-mssql
+          sudo apt-get install -y curl gnupg2 lsb-release
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/24.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
           sudo apt-get install -y unixodbc-dev
       
       - name: Install dependencies
