@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.13.2'
 
-      - name: Install ODBC Driver 18 for SQL Server and Azure CLI
+      - name: Install ODBC Driver 18 for SQL Server
         run: |
           sudo apt-get update
           sudo apt-get install -y curl gnupg2 lsb-release
@@ -27,7 +27,6 @@ jobs:
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
           sudo apt-get install -y unixodbc-dev
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 
       - name: Install dependencies
         run: |
