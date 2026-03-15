@@ -1,20 +1,56 @@
+"""Filter top 5 coins with positive predictions from coinswitch."""
+
 import pandas as pd
-import sqlite3
-import subprocess
 from datetime import datetime
+from sqlalchemy import MetaData, Table, Column, String, Float, DateTime, Integer, create_engine, select, insert, inspect
+from db_config import get_sqlalchemy_engine
+
+# Define table structures using SQLAlchemy
+metadata = MetaData()
+
+coin_predictions_table = Table(
+    'coin_predictions',
+    metadata,
+    Column('coin_id', String),
+    Column('prediction_date', DateTime),
+    Column('target_date', DateTime),
+    Column('predicted_price', Float),
+    Column('model_name', String),
+    autoload_with=None
+)
+
+positions_table = Table(
+    'positions',
+    metadata,
+    Column('id', Integer, primary_key=True),
+    Column('coin_id', String),
+    Column('open_date', String),
+    Column('close_date', String),
+    Column('predicted_open_price', Float),
+    Column('predicted_close_price', Float),
+    Column('actual_open_price', Float),
+    Column('actual_close_price', Float),
+    Column('position_type', String),
+    Column('profit_loss', Float),
+    Column('created_at', DateTime),
+    autoload_with=None
+)
 
 # Load coinswitch coin IDs
 coinswitch_mapping = pd.read_csv('coinswitch_coin_mapping.csv')
 coinswitch_coin_ids = set(coinswitch_mapping['coin_id'].dropna().str.lower())
 
-# Connect to predictions.sqlite and fetch predictions for coinswitch coins
-conn = sqlite3.connect('predictions.sqlite')
-query = '''
-SELECT coin_id, prediction_date, target_date, predicted_price, model_name
-FROM coin_predictions
-'''
-pred_df = pd.read_sql_query(query, conn)
-conn.close()
+# Fetch predictions for coinswitch coins from Azure SQL
+engine = get_sqlalchemy_engine()
+with engine.connect() as connection:
+    query = select(
+        coin_predictions_table.c.coin_id,
+        coin_predictions_table.c.prediction_date,
+        coin_predictions_table.c.target_date,
+        coin_predictions_table.c.predicted_price,
+        coin_predictions_table.c.model_name
+    )
+    pred_df = pd.read_sql(query, connection)
 
 # Filter for coinswitch coins
 pred_df = pred_df[pred_df['coin_id'].str.lower().isin(coinswitch_coin_ids)]
@@ -43,52 +79,53 @@ filtered_df = filtered_df.sort_values('5-Day % Change', ascending=False).head(5)
 
 # Output to CSV
 filtered_df.to_csv('top5_coinswitch_5day_predictions.csv', index=False)
-print('Filtered CSV written to top5_coinswitch_5day_predictions.csv using predictions.sqlite as source.')
+print('Filtered CSV written to top5_coinswitch_5day_predictions.csv using Azure SQL as source.')
 
-# --- Populate positions table in predictions.sqlite ---
-POSITIONS_DB = "predictions.sqlite"
+# --- Populate positions table in Azure SQL ---
 POSITIONS_TABLE = "positions"
 
 def ensure_positions_table():
-    conn = sqlite3.connect(POSITIONS_DB)
-    cur = conn.cursor()
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {POSITIONS_TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            coin_id TEXT,
-            open_date TEXT,
-            close_date TEXT,
-            predicted_open_price REAL,
-            predicted_close_price REAL,
-            actual_open_price REAL,
-            actual_close_price REAL,
-            position_type TEXT,
-            profit_loss REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    """Create positions table if it doesn't exist."""
+    engine = get_sqlalchemy_engine()
+    
+    # Use inspect() to check if table exists without holding a connection
+    inspector = inspect(engine)
+    table_exists = inspector.has_table(POSITIONS_TABLE)
+    
+    if not table_exists:
+        # Create the table - this needs to be done without holding a connection in the pool
+        metadata.create_all(engine, tables=[positions_table], checkfirst=True)
+        print(f"Created {POSITIONS_TABLE} table in Azure SQL.")
 
 def populate_positions_from_top5(csv_path="top5_coinswitch_5day_predictions.csv"):
+    """Populate positions table from top 5 predictions CSV."""
     ensure_positions_table()
     df = pd.read_csv(csv_path)
-    conn = sqlite3.connect(POSITIONS_DB)
-    cur = conn.cursor()
-    for _, row in df.iterrows():
-        coin_id = row['Coin']
-        predicted_prices = [float(x) for x in row['5-Day Predicted Prices'].split(",")]
-        open_date = datetime.utcnow().strftime("%Y-%m-%d")
-        close_date = None  # Could be set to open_date + 5 days if needed
-        predicted_open_price = predicted_prices[0]
-        predicted_close_price = predicted_prices[-1]
-        # Actual prices can be filled in later by another process
-        cur.execute(f"""
-            INSERT INTO {POSITIONS_TABLE} (coin_id, open_date, close_date, predicted_open_price, predicted_close_price, position_type)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (coin_id, open_date, close_date, predicted_open_price, predicted_close_price, 'long'))
-    conn.commit()
-    conn.close()
-    print(f"Populated {POSITIONS_TABLE} table with top 5 positions.")
+    engine = get_sqlalchemy_engine()
+    
+    try:
+        with engine.begin() as connection:
+            for _, row in df.iterrows():
+                coin_id = row['Coin']
+                predicted_prices = [float(x) for x in row['5-Day Predicted Prices'].split(",")]
+                open_date = datetime.utcnow().strftime("%Y-%m-%d")
+                close_date = None  # Could be set to open_date + 5 days if needed
+                predicted_open_price = predicted_prices[0]
+                predicted_close_price = predicted_prices[-1]
+                
+                # Build SQLAlchemy insert statement
+                stmt = insert(positions_table).values(
+                    coin_id=coin_id,
+                    open_date=open_date,
+                    close_date=close_date,
+                    predicted_open_price=predicted_open_price,
+                    predicted_close_price=predicted_close_price,
+                    position_type='long'
+                )
+                connection.execute(stmt)
+            
+            print(f"Populated {POSITIONS_TABLE} table with top 5 positions.")
+    finally:
+        engine.dispose()
 
 populate_positions_from_top5()

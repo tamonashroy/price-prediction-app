@@ -1,21 +1,71 @@
-import pandas as pd
-import sqlite3
+"""Compare actual vs predicted positions and calculate P&L."""
 
-DB = "predictions.sqlite"
-PRICE_DB = "coin_prices.db"
+import pandas as pd
+from sqlalchemy import MetaData, Table, Column, String, Float, DateTime, Integer, select
+from db_config import get_sqlalchemy_engine
+
+# Define table structures using SQLAlchemy
+metadata = MetaData()
+
+positions_table = Table(
+    'positions',
+    metadata,
+    Column('id', Integer, primary_key=True),
+    Column('coin_id', String),
+    Column('open_date', String),
+    Column('close_date', String),
+    Column('predicted_open_price', Float),
+    Column('predicted_close_price', Float),
+    Column('actual_open_price', Float),
+    Column('actual_close_price', Float),
+    Column('position_type', String),
+    Column('profit_loss', Float),
+    Column('created_at', DateTime),
+    autoload_with=None
+)
+
+predictions_table = Table(
+    'coin_predictions',
+    metadata,
+    Column('coin_id', String),
+    Column('prediction_date', DateTime),
+    Column('target_date', DateTime),
+    Column('predicted_price', Float),
+    Column('model_name', String),
+    autoload_with=None
+)
+
+coin_prices_table = Table(
+    'coin_prices',
+    metadata,
+    Column('coin_id', String),
+    Column('date', DateTime),
+    Column('price', Float),
+    autoload_with=None
+)
+
 POSITIONS_TABLE = "positions"
 PREDICTIONS_TABLE = "coin_predictions"
 
-# Load positions
-conn = sqlite3.connect(DB)
-pos_df = pd.read_sql_query(f"SELECT * FROM {POSITIONS_TABLE}", conn)
-pred_df = pd.read_sql_query(f"SELECT * FROM {PREDICTIONS_TABLE}", conn)
-conn.close()
+# Load positions and predictions using SQLAlchemy
+engine = get_sqlalchemy_engine()
 
-# Load actual prices
-conn = sqlite3.connect(PRICE_DB)
-price_df = pd.read_sql_query("SELECT coin_id, date, price FROM coin_prices", conn)
-conn.close()
+with engine.connect() as connection:
+    # Load positions
+    pos_query = select(positions_table)
+    pos_df = pd.read_sql(pos_query, connection)
+    
+    # Load predictions
+    pred_query = select(predictions_table)
+    pred_df = pd.read_sql(pred_query, connection)
+    
+    # Load actual prices
+    price_query = select(
+        coin_prices_table.c.coin_id,
+        coin_prices_table.c.date,
+        coin_prices_table.c.price
+    )
+    price_df = pd.read_sql(price_query, connection)
 
 results = []
 for _, pos in pos_df.iterrows():
