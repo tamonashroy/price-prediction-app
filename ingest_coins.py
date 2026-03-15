@@ -1,12 +1,13 @@
+"""
+Ingest cryptocurrency price data from CoinGecko into Azure SQL Database.
+"""
+
 import requests
 import pandas as pd
 import time
 import os
-from sqlalchemy import create_engine, text
 import sys
-
-DB_PATH = "coin_prices.db"
-engine = create_engine(f"sqlite:///{DB_PATH}")
+from db_config import get_pyodbc_connection, table_exists, get_sqlalchemy_engine
 
 COINS_LIMIT = 150
 SLEEP_BETWEEN_REQUESTS = 5  # seconds
@@ -19,7 +20,7 @@ def get_top_coins(limit=COINS_LIMIT):
     url = "https://api.coingecko.com/api/v3/coins/markets"
     params = {
         'vs_currency': 'usd',
-        'order': 'market_cap_desc',  # switched to market cap
+        'order': 'market_cap_desc',
         'per_page': limit,
         'page': 1,
         'sparkline': False
@@ -34,14 +35,17 @@ def get_top_coins(limit=COINS_LIMIT):
 # Get latest date for a coin from DB
 
 def get_latest_date_for_coin(coin_id):
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT MAX(date) FROM coin_prices WHERE coin_id = :coin_id
-        """), {"coin_id": coin_id})
-        row = result.fetchone()
+    conn = get_pyodbc_connection()
+    try:
+        query = "SELECT MAX(date) as max_date FROM coin_prices WHERE coin_id = ?"
+        cursor = conn.cursor()
+        cursor.execute(query, (coin_id,))
+        row = cursor.fetchone()
         if row and row[0]:
             return str(row[0])
         return None
+    finally:
+        conn.close()
 
 # Fetch daily price data for a coin, only for missing days
 
@@ -94,11 +98,6 @@ def add_technical_indicators(df):
     df['macd_hist'] = df['macd'] - df['macd_signal']
     return df
 
-def table_exists(engine, table_name):
-    # Check if a table exists in the SQLite database
-    with engine.connect() as conn:
-        return engine.dialect.has_table(conn, table_name)
-
 if __name__ == "__main__":
     # Only use coins from coinswitch mapping, sorted by market cap
     coinswitch_path = "coinswitch_coin_mapping.csv"
@@ -131,7 +130,7 @@ if __name__ == "__main__":
         sys.exit(1)
     for idx, (coin_id, coin_name) in enumerate(coins):
         print(f"[{idx+1}/{len(coins)}] Fetching {coin_name} ({coin_id})...")
-        if not table_exists(engine, "coin_prices"):
+        if not table_exists("coin_prices"):
             latest_date = None
         else:
             latest_date = get_latest_date_for_coin(coin_id)
@@ -141,11 +140,15 @@ if __name__ == "__main__":
             df['coin_name'] = coin_name
             # Add technical indicators before saving
             df = add_technical_indicators(df)
-            df.to_sql("coin_prices", engine, if_exists="append", index=False)
-            print(f"  Added {len(df)} new rows.")
+            # Use SQLAlchemy for easier DataFrame insert
+            engine = get_sqlalchemy_engine()
+            try:
+                df.to_sql("coin_prices", engine, if_exists="append", index=False)
+                print(f"  Added {len(df)} new rows.")
+            finally:
+                engine.dispose()
         else:
             print(f"  No new data for {coin_name}.")
         time.sleep(SLEEP_BETWEEN_REQUESTS)
-    print("Ingestion complete. All coin data saved to coin_prices.db.")
-    # Dispose engine to close all connections
+    print("Ingestion complete. All coin data saved to Azure SQL Database.")
     engine.dispose()

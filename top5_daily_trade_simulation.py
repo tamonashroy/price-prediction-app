@@ -1,28 +1,23 @@
+"""Simulate daily trading for top 5 coins."""
+
 import pandas as pd
-import sqlite3
 from datetime import datetime
+from db_config import read_sql_query
 
-PRED_DB = "coin_predictions.db"
-PRICE_DB = "coin_prices.db"
-
-# Read predictions from coin_predictions.db
+# Read predictions from Azure SQL
 def get_predictions():
-    conn = sqlite3.connect(PRED_DB)
-    df = pd.read_sql_query("""
+    df = read_sql_query("""
         SELECT coin_id, prediction_date, target_date, predicted_price, model_name
         FROM coin_predictions
-    """, conn)
-    conn.close()
+    """)
     return df
 
-# Read actual prices from coin_prices.db
+# Read actual prices from Azure SQL
 def get_actuals():
-    conn = sqlite3.connect(PRICE_DB)
-    df = pd.read_sql_query("""
+    df = read_sql_query("""
         SELECT coin_id, date, price
         FROM coin_prices
-    """, conn)
-    conn.close()
+    """)
     return df
 
 def main():
