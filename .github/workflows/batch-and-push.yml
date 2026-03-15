@@ -52,6 +52,7 @@ jobs:
           AZURE_SQL_CLIENT_SECRET: ${{ secrets.AZURE_SQL_CLIENT_SECRET }}
           AZURE_SQL_TENANT_ID: ${{ vars.AZURE_SQL_TENANT_ID }}
           AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Ingest latest price data
         run: python ingest_coins.py
