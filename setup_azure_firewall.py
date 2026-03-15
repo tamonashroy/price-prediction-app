@@ -73,6 +73,21 @@ def create_firewall_rule(ip_address, rule_name="GitHubActions"):
         
         print("✓ Azure authentication successful")
         
+        # Set default subscription
+        subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+        if subscription_id:
+            print(f"Setting default subscription to {subscription_id}...")
+            set_sub_response = subprocess.run(
+                ["az", "account", "set", "--subscription", subscription_id],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if set_sub_response.returncode != 0:
+                print(f"✗ Failed to set subscription: {set_sub_response.stderr}")
+                raise Exception(f"Failed to set subscription: {set_sub_response.stderr}")
+            print("✓ Subscription set successfully")
+        
         # Extract server name from connection string
         server_name = "cryptopp"
         resource_group = os.getenv("AZURE_RESOURCE_GROUP", "default-rg")
