@@ -2,9 +2,9 @@ name: Crypto Price Prediction - Daily Batch
 
 
 on:
-  schedule:
-    # Run daily at 2 AM UTC (adjust time as needed)
-    - cron: '0 2 * * *'
+  # schedule:
+  #   # Run daily at 2 AM UTC (adjust time as needed)
+  #   - cron: '0 2 * * *'
   workflow_dispatch:  # Allow manual trigger
 
 env:
