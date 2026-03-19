@@ -43,27 +43,22 @@ jobs:
           AZURE_SQL_TENANT_ID=${{ vars.AZURE_SQL_TENANT_ID }}
           EOF
 
-      - name: Set Azure SQL credentials from secrets
-        run: |
-          cat > .env << EOF
-          AZURE_SQL_SERVER=${{ vars.AZURE_SQL_SERVER }}
-          AZURE_SQL_DATABASE=${{ vars.AZURE_SQL_DATABASE }}
-          AZURE_SQL_CLIENT_ID=${{ vars.AZURE_SQL_CLIENT_ID }}
-          AZURE_SQL_CLIENT_SECRET=${{ secrets.AZURE_SQL_CLIENT_SECRET }}
-          AZURE_SQL_TENANT_ID=${{ vars.AZURE_SQL_TENANT_ID }}
-          EOF
 
       - name: Ingest latest price data
         run: python ingest_coins.py
+        continue-on-error: true
 
       - name: Run batch script
         run: python daily_batch_predict.py
+        continue-on-error: true
 
       - name: Filter top 5 green coinswitch coins
         run: python filter_top5_green_coinswitch.py
+        continue-on-error: true
 
       - name: Simulate daily trade performance
         run: python positions_actual_vs_predicted.py
+        continue-on-error: true
 
       - name: Record refresh timestamp
         run: |
