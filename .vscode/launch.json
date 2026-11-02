@@ -2,14 +2,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Streamlit App",
+            "name": "Streamlit dashboard",
             "type": "python",
             "request": "launch",
             "module": "streamlit",
-            "args": [
-                "run",
-                "app.py"
-            ],
+            "args": ["run", "app.py"],
+            "justMyCode": false
+        },
+        {
+            "name": "Pipeline (existing data, quick)",
+            "type": "python",
+            "request": "launch",
+            "module": "pricepredict.pipeline",
+            "args": ["--skip-ingest", "--skip-backtest", "--time-budget", "60"],
             "justMyCode": false
         }
     ]

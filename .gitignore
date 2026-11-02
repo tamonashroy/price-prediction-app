@@ -1,4 +1,17 @@
+# Python
 *.pyc
 __pycache__/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and local settings
 .env
+.env.local
+.neon
+.streamlit/secrets.toml
+
+# Scratch work
 play.ipynb
+catboost_info/
