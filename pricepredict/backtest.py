@@ -64,6 +64,17 @@ def market_filter(data):
     return bitcoin > 0
 
 
+def daily_picks(predictions, data, top_n=config.TOP_N):
+    """The coins that would have been proposed on each date the market filter allowed buying."""
+    buy_allowed = market_filter(data)
+    allowed = predictions[predictions["date"].map(buy_allowed).fillna(False).astype(bool)]
+    ranked = allowed.sort_values(["date", "prediction", "coin_id"], ascending=[True, False, True])
+    picks = ranked.groupby("date").head(top_n)
+    return picks.assign(
+        signal_date=picks["date"], pick_rank=picks.groupby("date").cumcount() + 1
+    )[["signal_date", "coin_id", "pick_rank"]].reset_index(drop=True)
+
+
 def _picks_return(day, score_column, top_n, cost, ascending=False):
     """Average net simple return of the top coins that day."""
     ranked = day.sort_values(score_column, ascending=ascending)

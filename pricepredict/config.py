@@ -38,6 +38,12 @@ MIN_DAILY_VOLUME_USD = 1_000_000  # thinly traded coins cannot be bought at the 
 # Check this against your exchange's fees; it excludes taxes.
 ROUND_TRIP_COST = 0.01
 
+# Paper trading: buy every pick, sell at the target or stop, or when PICK_HORIZON days are up.
+PAPER_TAKE_PROFIT = 0.10
+PAPER_STOP_LOSS = 0.05
+PAPER_STAKE_PER_DAY = 100  # USD split across the coins bought that day, so rules compare fairly
+PAPER_TOP_NS = (1, 2, 3, TOP_N)  # "buy only the first n picks" rules compared on the dashboard
+
 # Model selection
 AUTOML_TIME_BUDGET_SECONDS = 300
 AUTOML_ESTIMATORS = ("lgbm", "xgboost")

@@ -6,10 +6,12 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from pricepredict import config
+from pricepredict import config, paper
 from pricepredict.db import get_engine
 
 CACHE_SECONDS = 3600
+RULE_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+EXIT_LABELS = {"target": "Hit target", "stop": "Hit stop", "time": "Sold at 5 days"}
 # Fixed so each strategy keeps its colour whichever ones have data.
 STRATEGY_COLORS = {
     "Model top 5": "#2a78d6",
@@ -183,6 +185,198 @@ def show_track_record():
         st.dataframe(positions, hide_index=True, width="stretch")
 
 
+def paper_rules_text():
+    return (
+        f"Sell at +{config.PAPER_TAKE_PROFIT:.0%} or -{config.PAPER_STOP_LOSS:.0%}, or after "
+        f"{config.PICK_HORIZON} days, whichever comes first. Returns are after the "
+        f"{config.ROUND_TRIP_COST:.1%} trading cost, and exclude taxes."
+    )
+
+
+def show_rule_comparison(trades, empty_message):
+    """Compare buying only the first few picks each day against buying all of them."""
+    summary, curve = paper.top_n_report(trades)
+    if summary.empty:
+        st.info(empty_message)
+        return
+    stake = config.PAPER_STAKE_PER_DAY
+    st.caption(
+        # Escaped because Streamlit reads a pair of plain dollar signs as a math formula.
+        f"Every rule puts \\${stake} into each day with picks, split equally across the coins it buys, so the "
+        f"rules are comparable. That can tie up \\${stake * config.PICK_HORIZON} at once, because trades last up "
+        f"to {config.PICK_HORIZON} days."
+    )
+    curve = curve.assign(date=pd.to_datetime(curve["date"]))
+    rules = summary["Rule"].tolist()
+    chart = (
+        alt.Chart(curve)
+        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=30, filled=True))
+        .encode(
+            x=alt.X("date:T", title=None),
+            y=alt.Y("profit:Q", title="Total profit (USD)"),
+            color=alt.Color(
+                "Rule:N",
+                scale=alt.Scale(domain=rules, range=RULE_COLORS[: len(rules)]),
+                legend=alt.Legend(orient="top", title=None, symbolType="stroke"),
+            ),
+            tooltip=[
+                alt.Tooltip("Rule:N"),
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("profit:Q", title="Total profit (USD)", format="+,.2f"),
+            ],
+        )
+        .properties(height=320)
+    )
+    st.altair_chart(chart, width="stretch")
+    st.dataframe(
+        summary,
+        hide_index=True,
+        width="stretch",
+        column_order=["Rule", "trades", "invested", "profit", "return_pct", "win_rate_pct", "target_hits",
+                      "stop_hits", "time_exits", "worst_drop", "hold_profit"],
+        column_config={
+            "trades": st.column_config.NumberColumn("Closed trades", format="%d"),
+            "invested": st.column_config.NumberColumn("Total invested (USD)", format="%.0f"),
+            "profit": st.column_config.NumberColumn("Profit (USD)", format="%+.2f"),
+            "return_pct": st.column_config.NumberColumn("Return on invested", format="%+.2f%%"),
+            "win_rate_pct": st.column_config.NumberColumn("Profitable trades", format="%.0f%%"),
+            "target_hits": st.column_config.NumberColumn("Hit target", format="%d"),
+            "stop_hits": st.column_config.NumberColumn("Hit stop", format="%d"),
+            "time_exits": st.column_config.NumberColumn("Sold at 5 days", format="%d"),
+            "worst_drop": st.column_config.NumberColumn("Worst drop (USD)", format="%.2f"),
+            "hold_profit": st.column_config.NumberColumn("No target or stop (USD)", format="%+.2f"),
+        },
+    )
+
+
+def show_decision_log(signals):
+    log = paper.daily_log(signals)
+    log["signal_date"] = log["signal_date"].dt.date
+    log["published_at"] = pd.to_datetime(log["published_at"], utc=True).dt.strftime("%Y-%m-%d %H:%M")
+    st.subheader("Every day's decision")
+    st.dataframe(
+        log,
+        hide_index=True,
+        width="stretch",
+        column_order=["signal_date", "decision", "published_at", "picks_proposed", "trades_taken", "still_open",
+                      "closed", "average_return_pct"],
+        column_config={
+            "signal_date": "Date",
+            "decision": st.column_config.TextColumn("Decision", width="large"),
+            "published_at": "Published (UTC)",
+            "picks_proposed": st.column_config.NumberColumn("Proposed", format="%d"),
+            "trades_taken": st.column_config.NumberColumn("Taken", format="%d"),
+            "still_open": st.column_config.NumberColumn("Open", format="%d"),
+            "closed": st.column_config.NumberColumn("Closed", format="%d"),
+            "average_return_pct": st.column_config.NumberColumn("Average return", format="%+.2f%%"),
+        },
+    )
+
+
+def show_trade_ledger(trades):
+    st.subheader("Every trade")
+    ledger = trades.assign(
+        coin=trades["symbol"].str.upper(),
+        result=trades["exit_reason"].map(EXIT_LABELS).fillna("Open"),
+        # Open trades show what they would earn if sold at the latest checked price.
+        return_pct=trades["net_return_pct"].fillna(
+            (trades["last_price"] / trades["entry_price"] - 1 - config.ROUND_TRIP_COST) * 100
+        ),
+        entry_time=pd.to_datetime(trades["entry_at"], utc=True).dt.strftime("%Y-%m-%d %H:%M"),
+    )
+    st.dataframe(
+        ledger,
+        hide_index=True,
+        width="stretch",
+        column_order=["signal_date", "pick_rank", "coin", "entry_time", "entry_price", "target_price", "stop_price",
+                      "result", "exit_date", "exit_price", "return_pct", "hold_return_pct"],
+        column_config={
+            "signal_date": "Date",
+            "pick_rank": st.column_config.NumberColumn("Rank", format="%d"),
+            "coin": "Coin",
+            "entry_time": "Bought (UTC)",
+            "entry_price": st.column_config.NumberColumn("Bought at (USD)", format="%.6g"),
+            "target_price": st.column_config.NumberColumn("Target", format="%.6g"),
+            "stop_price": st.column_config.NumberColumn("Stop", format="%.6g"),
+            "result": "Result",
+            "exit_date": "Sold on",
+            "exit_price": st.column_config.NumberColumn("Sold at (USD)", format="%.6g"),
+            "return_pct": st.column_config.NumberColumn("Return (so far if open)", format="%+.2f%%"),
+            "hold_return_pct": st.column_config.NumberColumn("If held the full 5 days", format="%+.2f%%"),
+        },
+    )
+
+
+def show_paper_trading():
+    st.header("Paper trading")
+    st.caption(
+        "Every proposed pick is bought automatically at the live price when it's published, with no real money. "
+        f"{paper_rules_text()} Prices are from Binance where it lists the coin. Fills on CoinSwitch may differ."
+    )
+    signals = query(
+        "SELECT s.signal_date, s.published_at, s.market_allows_buying, s.picks_proposed, "
+        "COUNT(t.id) AS trades_taken, COUNT(*) FILTER (WHERE t.status = 'open') AS still_open, "
+        "COUNT(t.net_return_pct) AS closed, AVG(t.net_return_pct) AS average_return_pct "
+        "FROM trade_signals s LEFT JOIN paper_trades t ON t.signal_date = s.signal_date "
+        "GROUP BY s.signal_date, s.published_at, s.market_allows_buying, s.picks_proposed"
+    )
+    if signals.empty:
+        st.info("No decisions recorded yet. The first appears after the next pipeline run.")
+        return
+    trades = query(
+        "SELECT signal_date, pick_rank, symbol, entry_at, entry_price, target_price, stop_price, last_price, "
+        "exit_at::date AS exit_date, exit_price, exit_reason, net_return_pct, hold_return_pct "
+        "FROM paper_trades ORDER BY signal_date DESC, pick_rank"
+    )
+    closed = trades[trades["net_return_pct"].notna()]
+    proposed, taken = int(signals["picks_proposed"].sum()), len(trades)
+
+    columns = st.columns(4)
+    columns[0].metric("Days decided", len(signals))
+    columns[1].metric("Days with picks", int((signals["picks_proposed"] > 0).sum()))
+    columns[2].metric("Trades proposed", proposed)
+    columns[3].metric("Trades taken", taken)
+    if proposed != taken:
+        st.error(f"{proposed} trades were proposed but {taken} were recorded, so this record is incomplete.")
+    if not closed.empty:
+        columns = st.columns(4)
+        columns[0].metric("Still open", len(trades) - len(closed))
+        columns[1].metric("Closed", len(closed))
+        columns[2].metric("Profitable", f"{(closed['net_return_pct'] > 0).mean():.0%}")
+        columns[3].metric("Average return per trade", f"{closed['net_return_pct'].mean():+.2f}%")
+
+    show_decision_log(signals)
+    if not trades.empty:
+        show_trade_ledger(trades)
+    st.subheader("Which picks would have earned the most?")
+    show_rule_comparison(
+        trades,
+        "Nothing to compare yet. This fills in as trades close, up to 5 days after the first day with picks.",
+    )
+
+
+def show_replay():
+    st.header("Paper-trading rules on the past year")
+    st.caption(
+        f"A replay, not real results: what the same rules would have done on the backtest's picks. "
+        f"{paper_rules_text()} It buys at midnight and uses daily highs and lows, assuming the stop came first when "
+        "a day touched both levels. Its coins are today's largest, which flatters it, and this period also shaped "
+        "the model's design. The record above is the real test."
+    )
+    trades = query(
+        "SELECT signal_date, pick_rank, exit_date, exit_reason, net_return_pct, hold_return_pct, price_source "
+        "FROM replay_trades ORDER BY signal_date, pick_rank"
+    )
+    show_rule_comparison(trades, "No replay yet. It appears after the next full pipeline run.")
+    if not trades.empty:
+        no_daily_range = (trades["price_source"] != "binance").mean()
+        if no_daily_range > 0:
+            st.caption(
+                f"{no_daily_range:.0%} of these trades are coins Binance doesn't list, checked only against "
+                "each day's single stored price, so their targets and stops are less exact."
+            )
+
+
 def show_backtest(metrics):
     st.header("Backtest")
     st.caption(
@@ -276,9 +470,11 @@ def main():
 
     show_picks(as_of)
     show_coin_forecast(as_of)
+    show_paper_trading()
     show_track_record()
     if metrics:
         show_backtest(metrics)
+    show_replay()
     show_model_details(run)
 
 

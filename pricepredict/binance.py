@@ -16,37 +16,63 @@ from psycopg2.extras import execute_values
 
 from pricepredict import config
 from pricepredict.db import get_connection
+from pricepredict.paper import Candle
 
 logger = logging.getLogger(__name__)
 
 KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
+TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/price"
 PAGE_LIMIT = 1000
 SLEEP_SECONDS = 0.1
 HISTORY_START = datetime(2021, 1, 1, tzinfo=timezone.utc)
 
 
-def fetch_daily_closes(symbol, start):
-    """Return {date: close} for SYMBOLUSDT since `start`. Empty if Binance does not list it."""
-    closes = {}
+def _utc(milliseconds):
+    return datetime.fromtimestamp(milliseconds / 1000, timezone.utc)
+
+
+def _fetch_klines(symbol, interval, start, end=None):
+    """Return raw rows for SYMBOLUSDT from `start` up to `end`. Empty if Binance does not list it."""
+    klines = []
+    params = {"symbol": f"{symbol.upper()}USDT", "interval": interval, "limit": PAGE_LIMIT}
+    if end is not None:
+        params["endTime"] = int(end.timestamp() * 1000)
     start_ms = int(start.timestamp() * 1000)
     while True:
-        response = requests.get(
-            KLINES_URL,
-            params={"symbol": f"{symbol.upper()}USDT", "interval": "1d", "startTime": start_ms, "limit": PAGE_LIMIT},
-            timeout=30,
-        )
+        response = requests.get(KLINES_URL, params={**params, "startTime": start_ms}, timeout=30)
         if response.status_code == 400:  # Binance does not list this pair
-            return {}
+            return []
         response.raise_for_status()
         rows = response.json()
-        for row in rows:
-            # CoinGecko dates a price by the midnight it was taken at, so one day's
-            # close is the next day's price. row[6] is the last millisecond of the day.
-            closes[datetime.fromtimestamp((row[6] + 1) / 1000, timezone.utc).date()] = float(row[4])
+        klines.extend(rows)
         if len(rows) < PAGE_LIMIT:
-            return closes
+            return klines
         start_ms = rows[-1][6] + 1
         time.sleep(SLEEP_SECONDS)
+
+
+def fetch_daily_closes(symbol, start):
+    """Return {date: close} for SYMBOLUSDT since `start`. Empty if Binance does not list it."""
+    # CoinGecko dates a price by the midnight it was taken at, so one day's
+    # close is the next day's price. row[6] is the last millisecond of the day.
+    return {_utc(row[6] + 1).date(): float(row[4]) for row in _fetch_klines(symbol, "1d", start)}
+
+
+def fetch_candles(symbol, interval, start, end):
+    """Return Candles for SYMBOLUSDT between two times. Empty if Binance does not list it."""
+    return [
+        Candle(_utc(row[0]), _utc(row[6] + 1), float(row[1]), float(row[2]), float(row[3]), float(row[4]))
+        for row in _fetch_klines(symbol, interval, start, end)
+    ]
+
+
+def fetch_latest_price(symbol):
+    """Return the current price of SYMBOLUSDT, or None if Binance does not list it."""
+    response = requests.get(TICKER_URL, params={"symbol": f"{symbol.upper()}USDT"}, timeout=30)
+    if response.status_code == 400:
+        return None
+    response.raise_for_status()
+    return float(response.json()["price"])
 
 
 def plan_price_changes(stored, closes, today, add_missing):

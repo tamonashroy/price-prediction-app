@@ -12,9 +12,10 @@ Every day this project updates prices for the largest coins tradable on CoinSwit
 6. [Make and deploy changes](#6-make-and-deploy-changes)
 7. [The prediction model](#7-the-prediction-model)
 8. [How much to trust the picks](#8-how-much-to-trust-the-picks)
-9. [Settings you may want to change](#9-settings-you-may-want-to-change)
-10. [Free plan limits](#10-free-plan-limits)
-11. [Troubleshooting](#11-troubleshooting)
+9. [Paper trading](#9-paper-trading)
+10. [Settings you may want to change](#10-settings-you-may-want-to-change)
+11. [Free plan limits](#11-free-plan-limits)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -43,11 +44,12 @@ The pipeline in `pricepredict/pipeline.py` runs these steps in order:
 2. **Ingest:** updates the top 150 CoinSwitch coins from CoinGecko, plus the Fear & Greed index.
 3. **Verify:** corrects recent prices that disagree with Binance by more than 25%.
 4. **Check freshness:** stops with an error if fewer than 50 coins have recent prices.
-5. **Choose a model:** FLAML searches for the best settings for about 5 minutes.
-6. **Forecast:** trains one model per day ahead (1 to 5) and forecasts every eligible coin.
-7. **Pick:** selects the top 5, or none if Bitcoin is below its 30-day average.
-8. **Settle:** records what past picks really earned, after trading costs.
-9. **Backtest:** replays the last year and saves the results for the dashboard.
+5. **Update paper trades:** checks open trades against hourly prices and closes any that have finished.
+6. **Choose a model:** FLAML searches for the best settings for about 5 minutes.
+7. **Forecast:** trains one model per day ahead (1 to 5) and forecasts every eligible coin.
+8. **Pick:** selects the top 5, or none if Bitcoin is below its 30-day average, and opens a paper trade for each pick.
+9. **Settle:** records what past picks really earned, after trading costs.
+10. **Backtest:** replays the last year, applies the paper-trading rules to it, and saves the results for the dashboard.
 
 If a step fails, the workflow turns red and GitHub emails you. The old pipeline let failures pass silently, which is how it produced nothing for months while appearing healthy.
 
@@ -66,6 +68,8 @@ price-prediction-app/
 │   ├── features.py         Turns prices into model inputs
 │   ├── modeling.py         Models and the FLAML search
 │   ├── backtest.py         Replays the past and compares strategies
+│   ├── paper.py            Paper-trading rules and reports
+│   ├── paper_ledger.py     Opens and settles paper trades in the database
 │   └── pipeline.py         The daily job, start to finish
 ├── migrations/             Numbered database changes, applied automatically
 ├── scripts/                Tools you run by hand, rarely
@@ -102,7 +106,7 @@ Merge this code into `main`. The Daily Pipeline runs automatically at 02:00 UTC 
 
 ### Step 3: Run the pipeline once by hand
 
-In GitHub, open **Actions → Daily Pipeline → Run workflow**. It should take about 15 to 30 minutes and finish with a green check. If it fails, see [Troubleshooting](#11-troubleshooting).
+In GitHub, open **Actions → Daily Pipeline → Run workflow**. It should take about 15 to 30 minutes and finish with a green check. If it fails, see [Troubleshooting](#12-troubleshooting).
 
 ### Step 4: Deploy the dashboard on Streamlit Cloud
 
@@ -209,6 +213,9 @@ The second command refreshes your `.env` file. Always include `--file .env`, bec
 | `positions` | The daily picks and, once closed, what they really earned |
 | `model_runs` | One row per pipeline run: chosen model, settings, backtest scores |
 | `backtest_periods` | Period-by-period strategy returns from the latest backtest |
+| `trade_signals` | Each day's decision, whether to trade or stay out. Written once and never replaced |
+| `paper_trades` | Every paper trade: entry, target, stop, exit and return |
+| `replay_trades` | The paper-trading rules applied to the latest backtest. Replaced on every run |
 | `schema_migrations` | Which database changes have been applied |
 
 ### Useful queries
@@ -224,6 +231,10 @@ FROM positions WHERE profit_loss IS NOT NULL AND model_name <> 'legacy';
 
 -- Did the pipeline run recently?
 SELECT created_at, data_through, model_name FROM model_runs ORDER BY id DESC LIMIT 5;
+
+-- Paper trades, newest first
+SELECT signal_date, pick_rank, symbol, entry_price, status, exit_reason, net_return_pct
+FROM paper_trades ORDER BY signal_date DESC, pick_rank;
 ```
 
 ### Give the dashboard read-only access (recommended)
@@ -416,7 +427,7 @@ These tests ran on historical data with the design below, after 1% costs per tra
 
 ### What to do with this
 
-1. **Paper trade first.** Watch the dashboard's **Live track record** for at least 2 to 3 months, ideally through both rising and falling markets. It's the only test that can't be flattered by hindsight.
+1. **Paper trade first.** Watch the dashboard's **Paper trading** section (see [section 9](#9-paper-trading)) for at least 2 to 3 months, ideally through both rising and falling markets. It's the only test that can't be flattered by hindsight.
 2. **Compare with Hold Bitcoin.** If the live picks don't beat it after costs, the simpler choice is better.
 3. **Add coins that have since been delisted**, if you can get that data, to remove survivorship bias from the backtest.
 
@@ -431,7 +442,49 @@ These are untested, so each should have to prove itself in the backtest:
 
 ---
 
-## 9. Settings you may want to change
+## 9. Paper trading
+
+Paper trading answers one question: if you had taken every suggestion, would you have made money? No real orders are placed.
+
+### The rules
+
+- **Every pick is taken.** On a day with picks, the pipeline buys all 5 on paper. On a "stay out" day it buys nothing.
+- **Buying:** at the live price when the picks are published, not the midnight price the model used. GitHub often starts the job hours late, and nobody could buy at a price from hours earlier.
+- **Selling:** at +10%, at -5%, or after 5 days, whichever comes first.
+- **Costs:** every return is after the 1% round-trip cost, and excludes taxes.
+- **One decision per day:** only the first run for a date counts. Running the pipeline again later that day doesn't change what was proposed, which keeps the record honest.
+
+The target and stop are common round numbers, risking 1 to make 2. They weren't tuned on past data. You can change them in `config.py`, but each trade stores its own levels, so past trades keep the rules they started with.
+
+### How exits are worked out
+
+Each day the pipeline reads the hourly prices since a trade opened and walks through them in order, so a trade sold on Tuesday afternoon is recorded at that time even though the job only runs once a day.
+
+- If one hour touches both the target and the stop, it assumes the stop came first, because the order inside an hour isn't known.
+- If the price jumps past a level, the trade sells at the price after the jump, not at the level.
+- Prices come from Binance where it lists the coin, otherwise from CoinGecko's hourly prices. CoinGecko has no highs or lows, so a short spike between its points can be missed.
+
+### What the dashboard shows
+
+The **Paper trading** section has:
+
+- **Every day's decision:** each date, whether it traded or stayed out and why, trades proposed and taken, and days when the pipeline didn't finish.
+- **Every trade:** entry, target, stop, how it ended, its return, and what it would have earned if simply held for 5 days.
+- **Which picks would have earned the most?** Total profit from buying only the top 1, 2 or 3 picks each day, or all 5.
+
+Each rule invests the same $100 per day with picks, split equally across the coins it buys, so a rule doesn't look better just by spending more. Because trades last up to 5 days, this can tie up $500 at once.
+
+**Paper-trading rules on the past year**, further down the page, shows the same comparison on the backtest's picks. It's there to give a rough idea while live results build up, and it isn't evidence of real profit: it uses today's largest coins, buys at midnight, checks only daily highs and lows, and covers a period that shaped the model's design.
+
+### Limits
+
+- Real orders on CoinSwitch trade against INR, at prices that may differ from Binance's in USD, and may not fill exactly at the target or stop. Taxes also aren't included.
+- Picks can repeat. A coin proposed three days running is bought three times, because each day's suggestion is tested separately.
+- The paper entry happens during the pipeline run, before the dashboard shows the picks. The run still has the backtest to finish and the dashboard caches data for up to an hour, so you could only act on a pick somewhat later than its recorded entry.
+
+---
+
+## 10. Settings you may want to change
 
 All in `pricepredict/config.py`:
 
@@ -439,6 +492,9 @@ All in `pricepredict/config.py`:
 |---|---|---|
 | `ROUND_TRIP_COST` | 1% | Cost of buying and selling once. **Check this against your real CoinSwitch fees.** It excludes taxes; India's crypto taxes (1% TDS and 30% on gains at the time of writing) would reduce real returns further, so please confirm your position with a tax adviser |
 | `TOP_N` | 5 | How many coins to pick |
+| `PAPER_TAKE_PROFIT` | 10% | Paper trades sell at this gain |
+| `PAPER_STOP_LOSS` | 5% | Paper trades sell at this loss |
+| `PAPER_STAKE_PER_DAY` | $100 | Amount per day in the dashboard's comparison of top 1, 2, 3 and all 5 |
 | `UNIVERSE_SIZE` | 150 | How many coins to track |
 | `MIN_DAILY_VOLUME_USD` | $1M | Minimum trading volume for a pick |
 | `AUTOML_TIME_BUDGET_SECONDS` | 300 | How long FLAML searches |
@@ -450,7 +506,7 @@ To refresh CoinSwitch's coin list when new coins are listed, add your CoinSwitch
 
 ---
 
-## 10. Free plan limits
+## 11. Free plan limits
 
 | Resource | Neon Free plan limit | This project |
 |---|---|---|
@@ -469,7 +525,7 @@ pg_dump $env:DATABASE_URL --file backup.sql   # requires PostgreSQL's client too
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Likely cause and fix |
 |---|---|

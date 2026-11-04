@@ -11,6 +11,7 @@ from psycopg2.extras import execute_values
 
 from pricepredict import config
 from pricepredict.db import get_connection
+from pricepredict.paper import Candle
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,26 @@ def parse_market_chart(data):
     df["date"] = pd.to_datetime(df["timestamp"], unit="ms").dt.date
     df = df.sort_values("timestamp").drop_duplicates("date", keep="first")
     return df[["date", "price", "market_cap", "total_volume"]].dropna(subset=["price"])
+
+
+def fetch_hourly_candles(coin_id, days):
+    """
+    Recent hourly prices as Candles, for coins Binance does not list. CoinGecko gives one
+    price per point rather than a high and low, so a brief spike between points is missed.
+    """
+    time.sleep(_sleep_seconds())
+    data = _coingecko_get(f"coins/{coin_id}/market_chart", {"vs_currency": "usd", "days": days})
+    candles = []
+    for timestamp, price in (data or {}).get("prices", []):
+        moment = datetime.fromtimestamp(timestamp / 1000, timezone.utc)
+        candles.append(Candle(moment, moment, price, price, price, price))
+    return candles
+
+
+def fetch_latest_prices(coin_ids):
+    """Return {coin_id: current USD price} for the coins CoinGecko has a price for."""
+    data = _coingecko_get("simple/price", {"ids": ",".join(coin_ids), "vs_currencies": "usd"})
+    return {coin_id: quote["usd"] for coin_id, quote in (data or {}).items() if quote.get("usd")}
 
 
 def _days_to_fetch(last_complete_date, today):

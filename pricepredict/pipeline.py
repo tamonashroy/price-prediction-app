@@ -1,5 +1,5 @@
 """
-The daily job: update data, choose and train models, forecast, pick coins, score the past.
+The daily job: update data, choose and train models, forecast, pick coins, paper trade, score the past.
 
     python -m pricepredict.pipeline
     python -m pricepredict.pipeline --skip-ingest --time-budget 60
@@ -8,13 +8,14 @@ The daily job: update data, choose and train models, forecast, pick coins, score
 import argparse
 import json
 import logging
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 import requests
 from psycopg2.extras import execute_values
 
-from pricepredict import backtest, binance, config, ingest, modeling
+from pricepredict import backtest, binance, config, ingest, modeling, paper_ledger
 from pricepredict.db import apply_migrations, get_connection, get_engine
 from pricepredict.features import build_dataset
 
@@ -92,7 +93,28 @@ def save_forecasts(forecasts, as_of, model_name):
     logger.info("Saved %d forecasts for %d coins", len(rows), len(forecasts))
 
 
-def save_positions(picks, as_of, model_name):
+def publish_picks(picks, as_of, model_name, market_allows_buying):
+    """
+    Record the day's decision, its picks, and a paper trade for each pick, all or nothing.
+    Only the first run for a date counts: that's what was proposed, so re-runs leave it alone.
+    """
+    now = datetime.now(timezone.utc)
+    symbols = paper_ledger.load_symbols()
+    quotes = paper_ledger.fetch_entry_quotes(picks, symbols)
+    conn = get_connection()
+    try:
+        with conn, conn.cursor() as cursor:
+            if not paper_ledger.record_signal(cursor, as_of, now, model_name, market_allows_buying, len(picks)):
+                logger.info("%s was already decided; keeping that decision", as_of.date())
+                return False
+            save_positions(cursor, picks, as_of, model_name)
+            paper_ledger.open_trades(cursor, picks, as_of, now, model_name, quotes, symbols)
+    finally:
+        conn.close()
+    return True
+
+
+def save_positions(cursor, picks, as_of, model_name):
     column = f"log_return_{config.PICK_HORIZON}"
     close_date = (as_of + pd.Timedelta(days=config.PICK_HORIZON)).date()
     rows = [
@@ -110,20 +132,14 @@ def save_positions(picks, as_of, model_name):
         )
         for rank, row in enumerate(picks.itertuples(), start=1)
     ]
-    conn = get_connection()
-    try:
-        with conn, conn.cursor() as cursor:
-            cursor.execute("DELETE FROM positions WHERE open_date = %s", (as_of.date(),))
-            if rows:
-                execute_values(
-                    cursor,
-                    "INSERT INTO positions (coin_id, open_date, close_date, predicted_open_price, "
-                    "predicted_close_price, actual_open_price, position_type, pick_rank, "
-                    "predicted_return_pct, model_name) VALUES %s",
-                    rows,
-                )
-    finally:
-        conn.close()
+    if rows:
+        execute_values(
+            cursor,
+            "INSERT INTO positions (coin_id, open_date, close_date, predicted_open_price, "
+            "predicted_close_price, actual_open_price, position_type, pick_rank, "
+            "predicted_return_pct, model_name) VALUES %s",
+            rows,
+        )
     logger.info("Opened %d positions for %s", len(rows), as_of.date())
 
 
@@ -176,7 +192,16 @@ def run_backtest(data, feature_columns, as_of):
     finally:
         conn.close()
     logger.info("Backtest: rank IC %.4f (t=%.2f)", metrics["rank_ic"], metrics["rank_ic_t_stat"])
-    return metrics
+    return metrics, predictions
+
+
+def run_replay(predictions, data):
+    """Apply the paper-trading rules to the backtest's picks. Keeps the last replay if Binance is unavailable."""
+    try:
+        picks = backtest.daily_picks(predictions, data)
+        paper_ledger.save_replay(paper_ledger.build_replay(picks, data, paper_ledger.load_symbols()))
+    except requests.RequestException as error:
+        logger.warning("Skipped the paper-trading replay: %s", error)
 
 
 def save_run(as_of, description, metrics, importance):
@@ -209,6 +234,7 @@ def run(skip_ingest=False, skip_backtest=False, time_budget=config.AUTOML_TIME_B
             # A check, not a data source: losing it for a day should not stop the forecast.
             logger.warning("Skipped the Binance price check: %s", error)
     ingest.check_freshness()
+    paper_ledger.settle_trades()
 
     data, feature_columns = load_dataset()
     as_of = latest_forecast_date(data)
@@ -222,10 +248,13 @@ def run(skip_ingest=False, skip_backtest=False, time_budget=config.AUTOML_TIME_B
     picks = choose_picks(forecasts, market_allows_buying)
 
     save_forecasts(forecasts, as_of, model_name)
-    save_positions(picks, as_of, model_name)
+    publish_picks(picks, as_of, model_name, market_allows_buying)
     settle_positions()
 
-    metrics = run_backtest(data, feature_columns, as_of) if not skip_backtest else None
+    metrics = None
+    if not skip_backtest:
+        metrics, predictions = run_backtest(data, feature_columns, as_of)
+        run_replay(predictions, data)
     save_run(as_of, description, metrics, modeling.feature_importance(pick_model, feature_columns))
     logger.info("Picks for %s: %s", as_of.date(), ", ".join(picks["coin_id"]) or "none, market filter says stay out")
 
